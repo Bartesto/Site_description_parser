@@ -1,0 +1,222 @@
+---
+title: "Data extraction from Marilla Station field notes"
+author: "Bart Huntley"
+date: "14/10/2019"
+output: html_document
+---
+
+# Intro
+Field work was undertaken on Marilla Station in 1992 and the site descriptions 
+were compiled into an Appendix document *"Appendices to Land Resources of Marilla Station and Recommendations for Management"*. The site descriptions contained useful information and without 
+access to any digital version of the data, the data was extracted 
+programatically. 
+
+This document outlines the code and thinking behind the 
+extraction process. Whilst much of the code here is very particular to the 
+specific format of the data in the Appendix document, the code might be 
+adaptable to other similar scenarios.
+
+The data was extracted via a 3 step process:
+
+1. Preprocessing of the hard copy site descriptions
+2. Running the extraction code utilising the tesseract::ocr function
+3. Final manual edit
+
+## Step 1
+Through trial and error, the best digital copy of the document (based on 
+minimal ocr reading errors) was black and white tif format. As such each of 
+the 111 one page site descriptions were scanned using these settings.
+
+## Step 2
+A loop was written in R to cycle through the tif's, convert them to text using 
+the tesseract::ocr function, and via the use of a series of helper functions, 
+extract information useful for further analysis using remote sensing data.
+
+Information that was extracted included:
+
+* Site name
+* Easting and Northings
+* Projected Foliar Cover
+* Vegetation Group
+* Vegetation Condition Rating
+
+The following outlines the code to enable this.
+
+### Step 2.1 Initial Setup
+Load libraries, grab a list of the tif documents and setup an empty data frame 
+for results.
+
+```{r, Initial_Setup, eval = FALSE}
+# load libraries
+library(tesseract)
+library(tidyverse)
+
+# read in tif docs
+doc <- list.files(path = '.', pattern = ".tif$", full.names = TRUE)
+
+# create df for results
+outdf <- data.frame(matrix(ncol = 7, nrow = 0))
+colnames(outdf) <- c("tif", "site", "AMG_easting", "AMG_northing", "pfc", 
+                     "veg_group", "veg_condition")
+```
+
+### Step 2.2 Helper Functions
+Whilst the ocr function does a good job of converting most of the site 
+description documents to text, due to the layout of the original documents and 
+the scanner's internal conversion to tif algorithms, data fields do not remain 
+in static positions. A pity, as it meant that simple indexing of the ocr output 
+could not be relied upon to consistently locate required parameters. Therefore 
+the following helper functions were written to locate key words and extract the 
+desired parameters.
+
+The output from the ocr function is a long character string. I took the path of 
+splitting up the string into a list. The way I split the string was better for 
+some of the parameters and therefore the helper functions are designed around 
+specic list versions of the same original character string output from ocr. In 
+the end I settled on two list versions, hereafter referred to as type 1 and 
+type 2.
+
+First helper was for extracting the site name - generally a number. I found that 
+on occasion the ocr read a "t" as an "f" so the function is largely 
+differentiating between these scenarios and acting appropriately.
+```{r, site, eval = FALSE}
+# finds site number in list - l is type 1 list
+site_finder <- function(l){
+  res <- lapply(l, function(ch) grep("Site|Sife", ch))
+  ind <- sapply(res, function(x) length(x) > 0)
+  
+  if(sum(grepl("Siteno|Sifeno", unlist(l[ind]))) > 0){
+    site <- grep("Siteno|Sifeno", unlist(l[ind]))
+    siten <- ifelse(identical(unlist(l[ind])[site + 1], ""),
+                   unlist(l[ind])[site + 2],
+                   unlist(l[ind])[site + 1])
+  } else {
+    site <- grep("Site", unlist(l[ind]))
+    siten <- unlist(l[ind])[site[1] + 2]
+  }
+  
+  return(siten)
+}
+```
+
+Next up is a helper for extracting the AMG co-ordinates. Nothing too tricky here 
+but have instigated the "if I can't find what you are looking for I'm sticking 
+a 999 in the output" paradigm. Essentially this enabled a final sanity check of 
+the output where 999 values could be checked and updated from looking at the 
+original scans. Obviously the aim here was to minimise the 999's.
+```{r, coords, eval = FALSE}
+
+# finds amg eastings and northings - l is type 1 list
+coord_finder <- function(l){
+  res <- lapply(l, function(ch) grep("AMG", ch))
+  ind <- sapply(res, function(x) length(x) > 0)
+  amg <-  grep("AMG", unlist(l[ind]))
+  amgline <- gsub("_", "", unlist(l[ind]))
+  if(sum(ind) == 0){
+    coords <- c("999", "999")
+  } else {
+    if(is.na(as.numeric(str_sub(amgline[amg + 1], start = 1, end = 1)))){
+      coords <- amgline[c(amg + 2, amg + 3)]
+    } else {
+      coords <- amgline[c(amg + 1, amg + 2)]
+    }
+  }
+  return(coords)
+}
+```
+
+
+Finding the projected foliar cover was next.
+```{r, pfc, eval = FALSE}
+# finds pfc returns NA if blank - l is type 1 list
+pfc_finder <- function(l){
+  res <- lapply(l, function(ch) grep("Projected", ch))
+  ind <- sapply(res, function(x) length(x) > 0)
+  proj <- grep("Projected", unlist(l[ind]))
+  pfc <- ifelse(length(unlist(l[ind])) == proj + 2, NA, 
+                unlist(l[ind])[proj + 3])
+  return(pfc)
+}
+```
+
+The next two helpers are concerned with vegetation group and condition rating, 
+both of which utilising type 2 lists.
+```{r, veg, eval = FALSE}
+# finds veg group - l is type 2 list
+veg_group_finder <- function(l){
+  res <- lapply(l, function(ch) grep("group", ch))
+  ind <- sapply(res, function(x) length(x) > 0)
+  if(sum(ind) == 0){
+    v_gp <- "999"
+  } else {
+    gp <- grep("group", unlist(l[ind]))
+    proj_loc <- grep("Projected", unlist(str_split(unlist(l[ind])[gp + 1], " ")))
+    v_gp <-  paste(unlist(str_split(unlist(l[ind])[gp + 1], " "))[1:(proj_loc - 1)],
+                   collapse = ' ')
+  }
+  return(v_gp)
+}
+
+
+# finds veg cond - l is type 2 list
+veg_cond_finder <- function(l){
+  res <- lapply(l, function(ch) grep(" rating", ch))
+  ind <- sapply(res, function(x) length(x) > 0)
+  if(sum(ind) == 0){
+    v_cond <- "999"
+  } else {
+    cp <- grep(" rating", unlist(l[ind]))
+    v_cond <- unlist(l[ind])[cp + 1]
+  }
+  return(v_cond)
+}
+```
+
+## Step 2.3 The Loop
+Next I bundled all the helper functions into a loop. The loop goes through the list of tifs and grabs one, reads it in as text and constructs the type 1 and 2 lists as mentioned previously. Then utilising the helper functions one after another, the parameters are extracted and inserted into the output data frame.
+
+With more time spent on the helper functions and writing more exception rules, accuracy might have been further tweaked. This however would have meant more time and an even less generalised code. My workflow in testing this loop involved running it, then finding where it falls over, tweaking the helper function involved...rinse and repeat. To aid in finding where things imploded I print to screen the current document in the loop. Knowing that the output was still going to require some edits, I also inserted the document name to the output.
+```{r, loop, eval = FALSE}
+for(i in seq_along(doc)){
+  # grab a document and convert to text
+  t <- tesseract::ocr(doc[i])
+  
+  # make type 1 list - separating on returns then on spaces
+  t1 <- t %>%
+    stringr::str_split(pattern = "\n") %>%
+    unlist() %>%
+    stringr::str_split(pattern = " ")
+  
+  # make type 1 list -  separating on returns then on colons
+  t2 <- t %>%
+    stringr::str_split(pattern = "\n") %>%
+    unlist() %>%
+    stringr::str_split(pattern = ":")
+  
+  # grab site
+  outdf[i, 2] <- site_finder(t1)
+  
+  # grab coords
+  coords <- coord_finder(t1) 
+  outdf[i, 3] <- coords[1]
+  outdf[i, 4] <- coords[2]
+  
+  # grab projected foliar cover
+  outdf[i, 5] <- pfc_finder(t1)
+  
+  # grab veg group
+  outdf[i, 6] <- veg_group_finder(t2)
+  
+  # grab veg cond
+  outdf[i, 7] <- veg_cond_finder(t2)
+  
+  # grab document tif number
+  outdf[i, 1] <- doc[i]
+  
+  # print document tif number
+  cat(paste0(doc[i], "\n"))
+}
+```
+
+## Step 3
+So the final push. This involved looking at the exported csv and refering back to the tifs when 999's were found or when things obviously didn't look right. For example not enough digits in the Eastings or other obvious erors. With the tif document names in the output this task was easily accomplished and perhaps added 5 minutes overall.
